@@ -1,52 +1,37 @@
+# Cloudflare 터널 및 다중 도메인 지원을 위한 최종 docker-compose.yaml 파일입니다.
 services:
+  # =================================================================
+  # Traefik 서비스 (Cloudflare 사용에 맞게 간소화)
+  # =================================================================
   traefik:
     image: traefik
     container_name: traefik
     restart: always
     command:
-      --api=true
-      --ping=true
-      --providers.docker=true
-      --providers.file.directory=/etc/traefik/
-      --providers.file.watch=true
-      --api.dashboard=true
-      --api.debug=false
-      --api.insecure=${TRAEFIK_API_INSECURE:-false}
-      --metrics.prometheus=true
-      --metrics.prometheus.buckets=0.1,0.3,1.2,5.0
-      --metrics.prometheus.addEntryPointsLabels=true
-      --entrypoints.http.address=:80
-      --entrypoints.https.address=:443
-      --entryPoints.http.forwardedHeaders.insecure
-      --entryPoints.https.forwardedHeaders.insecure
-      --certificatesresolvers.letsencryptresolver.acme.email=${TRAEFIK_ACME_EMAIL:-your@email.com}
-      --certificatesresolvers.letsencryptresolver.acme.storage=/acme/acme.json
-      --certificatesresolvers.letsencryptresolver.acme.httpchallenge.entrypoint=http
-      --log.level=INFO
+      - "--api=true"
+      - "--ping=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.http.address=:80"
+      - "--api.dashboard=true"
+      - "--log.level=INFO"
+      - "--entrypoints.http.forwardedHeaders.insecure=true"
     ports:
-      - "80:80"
-      - "443:443"
-      - "8123:8123"
-      - "8082:8082"
-      - "8080:8080"
+      - "5000:80"
+      - "5001:8123"
+      - "5010:8082"
+      - "5011:8080"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./acme/:/acme/
+      - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./fileprovider:/etc/traefik:ro
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=web"
-      - "traefik.http.routers.dashboard-http-router.entrypoints=http"
-      - "traefik.http.routers.dashboard-http-router.rule=Host(`${TRAEFIK_HOST}`) && (PathPrefix(`/api`) || PathPrefix(`/dashboard`))"
+      - "traefik.http.routers.dashboard-http.rule=Host(`${TRAEFIK_HOST}`)"
+      - "traefik.http.routers.dashboard-http.entrypoints=http"
+      - "traefik.http.routers.dashboard-http.service=api@internal"
+      - "traefik.http.routers.dashboard-http.middlewares=dashboard-auth"
       - "traefik.http.middlewares.dashboard-auth.basicauth.users=admin:${TRAEFIK_ADMIN_PASS}"
-      - "traefik.http.routers.dashboard-https-router.tls.certresolver=letsencryptresolver"
-      - "traefik.http.middlewares.dashboard-redirect.redirectscheme.scheme=https"
-      - "traefik.http.routers.dashboard-http-router.middlewares=dashboard-redirect"
-      - "traefik.http.routers.dashboard-https-router.middlewares=dashboard-auth"
-      - "traefik.http.routers.dashboard-https-router.service=api@internal"
-      - "traefik.http.routers.dashboard-https-router.entrypoints=https"
-      - "traefik.http.routers.dashboard-https-router.tls=true"
-      - "traefik.http.routers.dashboard-https-router.rule=Host(`${TRAEFIK_HOST}`) && (PathPrefix(`/api`) || PathPrefix(`/dashboard`))"
     healthcheck:
       test: ["CMD-SHELL", "traefik healthcheck --ping"]
       interval: 30s
@@ -56,6 +41,7 @@ services:
     networks:
       - web
 
+  # mailpit, db, redis는 수정이 필요 없습니다.
   mailpit:
     image: axllent/mailpit
     ports:
@@ -89,6 +75,9 @@ services:
     networks:
       - web
 
+  # =================================================================
+  # Web 서비스 (라우팅 규칙을 .env 파일과 연동)
+  # =================================================================
   web:
     image: ghcr.io/latitude-dev/web:latest
     restart: always
@@ -96,6 +85,8 @@ services:
     platform: linux/amd64
     env_file:
       - .env
+    ports:
+      - '5100:8080'
     volumes:
       - shared-storage:/app/storage/files:rw
       - shared-storage:/app/apps/web/public/files:rw
@@ -105,19 +96,15 @@ services:
       args:
         - NEXT_SERVER_ACTIONS_ENCRYPTION_KEY=${NEXT_SERVER_ACTIONS_ENCRYPTION_KEY}
     labels:
+      # --- 수정된 부분 시작 ---
+      # 제안해주신 새로운 도메인 구조로 Host 규칙을 수정합니다.
       - "traefik.enable=true"
       - "traefik.docker.network=web"
-      - "traefik.http.services.web-service.loadbalancer.server.port=8080"
+      - "traefik.http.routers.web-http.rule=Host(`app-latitude.${APP_DOMAIN}`) || Host(`docs-latitude.${APP_DOMAIN}`)"
       - "traefik.http.routers.web-http.entrypoints=http"
       - "traefik.http.routers.web-http.service=web-service"
-      - "traefik.http.routers.web-http.rule=Host(`app-latitude.${APP_DOMAIN}`)"
-      - "traefik.http.routers.web-https.tls.certresolver=letsencryptresolver"
-      - "traefik.http.middlewares.web-redirect.redirectscheme.scheme=https"
-      - "traefik.http.routers.web-http.middlewares=web-redirect"
-      - "traefik.http.routers.web-https.entrypoints=https"
-      - "traefik.http.routers.web-https.tls=true"
-      - "traefik.http.routers.web-https.rule=Host(`app-latitude.${APP_DOMAIN}`)"
-      - "traefik.http.routers.web-https.service=web-service"
+      - "traefik.http.services.web-service.loadbalancer.server.port=8080"
+      # --- 수정된 부분 끝 ---
     depends_on:
       - db
       - redis
@@ -125,6 +112,7 @@ services:
     networks:
       - web
 
+  # migrations는 수정이 필요 없습니다.
   migrations:
     image: ghcr.io/latitude-dev/migrations:latest
     container_name: latitude-llm-migrations
@@ -141,6 +129,7 @@ services:
     networks:
       - web
 
+  # Gateway, Workers, Websockets 서비스는 기존과 동일합니다.
   gateway:
     image: ghcr.io/latitude-dev/gateway:latest
     restart: always
@@ -154,17 +143,10 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=web"
-      - "traefik.http.services.gateway-service.loadbalancer.server.port=8080"
+      - "traefik.http.routers.gateway-http.rule=Host(`gateway-latitude.${APP_DOMAIN}`)"
       - "traefik.http.routers.gateway-http.entrypoints=http"
       - "traefik.http.routers.gateway-http.service=gateway-service"
-      - "traefik.http.routers.gateway-http.rule=Host(`gateway-latitude.${APP_DOMAIN}`)"
-      - "traefik.http.routers.gateway-https.tls.certresolver=letsencryptresolver"
-      - "traefik.http.middlewares.gateway-redirect.redirectscheme.scheme=https"
-      - "traefik.http.routers.gateway-http.middlewares=gateway-redirect"
-      - "traefik.http.routers.gateway-https.entrypoints=https"
-      - "traefik.http.routers.gateway-https.tls=true"
-      - "traefik.http.routers.gateway-https.rule=Host(`gateway-latitude.${APP_DOMAIN}`)"
-      - "traefik.http.routers.gateway-https.service=gateway-service"
+      - "traefik.http.services.gateway-service.loadbalancer.server.port=8080"
     depends_on:
       - db
       - redis
@@ -200,24 +182,16 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=web"
-      - "traefik.http.services.websockets-service.loadbalancer.server.port=4002"
+      - "traefik.http.routers.websockets-http.rule=Host(`ws-latitude.${APP_DOMAIN}`)"
       - "traefik.http.routers.websockets-http.entrypoints=http"
       - "traefik.http.routers.websockets-http.service=websockets-service"
-      - "traefik.http.routers.websockets-http.rule=Host(`ws-latitude.${APP_DOMAIN}`)"
-      - "traefik.http.routers.websockets-https.tls.certresolver=letsencryptresolver"
-      - "traefik.http.middlewares.websockets-redirect.redirectscheme.scheme=https"
-      - "traefik.http.routers.websockets-http.middlewares=websockets-redirect"
-      - "traefik.http.routers.websockets-https.entrypoints=https"
-      - "traefik.http.routers.websockets-https.tls=true"
-      - "traefik.http.routers.websockets-https.rule=Host(`ws-latitude.${APP_DOMAIN}`)"
-      - "traefik.http.routers.websockets-https.service=websockets-service"
+      - "traefik.http.services.websockets-service.loadbalancer.server.port=4002"
     depends_on:
       - db
       - redis
     networks:
       - web
 
-# You need to create external network for Traefik to work (docker network create web)
 networks:
   web:
     external: true
